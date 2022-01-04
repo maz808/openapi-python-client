@@ -10,7 +10,7 @@ __all__ = [
 ]
 
 from itertools import chain
-from typing import Any, ClassVar, Dict, Generic, Iterable, List, Optional, Set, Tuple, TypeVar, Union
+from typing import Any, ClassVar, Dict, Generic, Iterable, List, NamedTuple, Optional, Set, Tuple, TypeVar, Union
 
 import attr
 
@@ -22,7 +22,10 @@ from .converter import convert, convert_chain
 from .enum_property import EnumProperty
 from .model_property import ModelProperty, build_model_property
 from .property import Property
-from .schemas import Class, Schemas, parse_reference_path, update_schemas_with_data
+from .reference_property import ReferenceProperty
+from .class_ import Class
+from .meta import get_enum_default
+from .schemas import Schemas, parse_reference_path, update_schemas_with_data
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -409,31 +412,6 @@ def build_enum_property(
     return prop, schemas
 
 
-def get_enum_default(prop: EnumProperty, data: oai.Schema) -> Union[Optional[str], PropertyError]:
-    """
-    Run through the available values in an EnumProperty and return the string representing the default value
-    in `data`.
-
-    Args:
-        prop: The EnumProperty to search for the default value.
-        data: The schema containing the default value for this enum.
-
-    Returns:
-        If `default` is `None`, then `None`.
-            If `default` is a valid value in `prop`, then the string representing that variant (e.g. MyEnum.MY_VARIANT)
-            If `default` is a value that doesn't match a variant of the enum, then a `PropertyError`.
-    """
-    default = data.default
-    if default is None:
-        return None
-
-    inverse_values = {v: k for k, v in prop.values.items()}
-    try:
-        return f"{prop.class_info.name}.{inverse_values[default]}"
-    except KeyError:
-        return PropertyError(detail=f"{default} is an invalid default for enum {prop.class_info.name}", data=data)
-
-
 def build_union_property(
     *, data: oai.Schema, name: str, required: bool, schemas: Schemas, parent_name: str, config: Config
 ) -> Tuple[Union[UnionProperty, PropertyError], Schemas]:
@@ -536,23 +514,24 @@ def _property_from_ref(
     ref_path = parse_reference_path(data.ref)
     if isinstance(ref_path, ParseError):
         return PropertyError(data=data, detail=ref_path.detail), schemas
-    existing = schemas.classes_by_reference.get(ref_path)
-    if not existing:
-        return PropertyError(data=data, detail="Could not find reference in parsed models or enums"), schemas
 
-    prop = attr.evolve(
-        existing,
+    prop = ReferenceProperty(
         required=required,
         name=name,
         python_name=utils.PythonIdentifier(value=name, prefix=config.field_prefix),
+        nullable=False,
+        description=None,
+        example=None,
+        default=None,
+        ref_path=ref_path,
+        parent=parent,
     )
-    if parent:
-        prop = attr.evolve(prop, nullable=parent.nullable)
-        if isinstance(prop, EnumProperty):
-            default = get_enum_default(prop, parent)
-            if isinstance(default, PropertyError):
-                return default, schemas
-            prop = attr.evolve(prop, default=default)
+
+    existing = schemas.classes_by_reference.get(prop.ref_path)
+    if existing:
+        prop.resolve(existing)
+    else:
+        schemas.unresolved_references.append(prop)
 
     return prop, schemas
 
@@ -569,7 +548,14 @@ def _property_from_data(
     """Generate a Property from the OpenAPI dictionary representation of it"""
     name = utils.remove_string_escapes(name)
     if isinstance(data, oai.Reference):
-        return _property_from_ref(name=name, required=required, parent=None, data=data, schemas=schemas, config=config)
+        return _property_from_ref(
+            name=name,
+            required=required,
+            parent=None,
+            data=data,
+            schemas=schemas,
+            config=config,
+        )
 
     sub_data: List[Union[oai.Schema, oai.Reference]] = data.allOf + data.anyOf + data.oneOf
     # A union of a single reference should just be passed through to that reference (don't create copy class)
@@ -689,10 +675,165 @@ def property_from_data(
     """
     try:
         return _property_from_data(
-            name=name, required=required, data=data, schemas=schemas, parent_name=parent_name, config=config
+            name=name,
+            required=required,
+            data=data,
+            schemas=schemas,
+            parent_name=parent_name,
+            config=config,
         )
     except ValidationError:
         return PropertyError(detail="Failed to validate default value", data=data), schemas
+
+
+def _values_are_subset(first: EnumProperty, second: EnumProperty) -> bool:
+    return set(first.values.items()) <= set(second.values.items())
+
+
+def _types_are_subset(first: EnumProperty, second: Property) -> bool:
+    from . import IntProperty, StringProperty
+
+    if first.value_type == int and isinstance(second, IntProperty):
+        return True
+    if first.value_type == str and isinstance(second, StringProperty):
+        return True
+    return False
+
+
+def _enum_subset(first: Property, second: Property) -> Optional[EnumProperty]:
+    """Return the EnumProperty that is the subset of the other, if possible."""
+
+    if isinstance(first, EnumProperty):
+        if isinstance(second, EnumProperty):
+            if _values_are_subset(first, second):
+                return first
+            if _values_are_subset(second, first):  # pylint: disable=arguments-out-of-order
+                return second
+            return None
+        return first if _types_are_subset(first, second) else None
+    # pylint: disable=arguments-out-of-order
+    if isinstance(second, EnumProperty) and _types_are_subset(second, first):
+        return second
+    return None
+
+
+def _merge_properties(first: Property, second: Property) -> Union[Property, PropertyError]:
+    if isinstance(first, ReferenceProperty):
+        first = first.ref_resolution
+    if isinstance(second, ReferenceProperty):
+        second = second.ref_resolution
+    nullable = first.nullable and second.nullable
+    required = first.required or second.required
+
+    err = None
+
+    if first.__class__ == second.__class__:
+        first = attr.evolve(first, nullable=nullable, required=required)
+        second = attr.evolve(second, nullable=nullable, required=required)
+        if first == second:
+            return first
+        err = PropertyError(header="Cannot merge properties", detail="Properties has conflicting values")
+
+    enum_subset = _enum_subset(first, second)
+    if enum_subset is not None:
+        return attr.evolve(enum_subset, nullable=nullable, required=required)
+
+    return err or PropertyError(
+        header="Cannot merge properties",
+        detail=f"{first.__class__}, {second.__class__}Properties have incompatible types",
+    )
+
+
+class _PropertyData(NamedTuple):
+    optional_props: List[Property]
+    required_props: List[Property]
+    schemas: Schemas
+
+
+# pylint: disable=too-many-locals,too-many-branches
+def _process_properties(
+    *, data: oai.Schema, schemas: Schemas, class_name: str, config: Config
+) -> Union[_PropertyData, PropertyError]:
+    from . import property_from_data
+
+    properties: Dict[str, Property] = {}
+    required_set = set(data.required or [])
+
+    def _add_if_no_conflict(new_prop: Property) -> Optional[PropertyError]:
+        nonlocal properties
+
+        existing = properties.get(new_prop.name)
+        merged_prop_or_error = _merge_properties(existing, new_prop) if existing else new_prop
+        if isinstance(merged_prop_or_error, PropertyError):
+            merged_prop_or_error.header = (
+                f"Found conflicting properties named {new_prop.name} when creating {class_name}"
+            )
+            return merged_prop_or_error
+        properties[merged_prop_or_error.name] = merged_prop_or_error
+        return None
+
+    unprocessed_props = data.properties or {}
+    for sub_prop in data.allOf:
+        if isinstance(sub_prop, oai.Reference):
+            ref_path = parse_reference_path(sub_prop.ref)
+            if isinstance(ref_path, ParseError):
+                return PropertyError(detail=ref_path.detail, data=sub_prop)
+            sub_model = schemas.classes_by_reference.get(ref_path)
+            if sub_model is None:
+                return PropertyError(f"Reference {sub_prop.ref} not found")
+            if not isinstance(sub_model, ModelProperty):
+                return PropertyError("Cannot take allOf a non-object")
+            if len(sub_model.required_properties) + len(sub_model.optional_properties) == 0:
+                return PropertyError("Recursive and circular references in allOf are not supported", data=sub_prop)
+            for prop in chain(sub_model.required_properties, sub_model.optional_properties):
+                err = _add_if_no_conflict(prop)
+                if err is not None:
+                    return err
+        else:
+            unprocessed_props.update(sub_prop.properties or {})
+            required_set.update(sub_prop.required or [])
+
+    for key, value in unprocessed_props.items():
+        prop_required = key in required_set
+        prop_or_error: Union[Property, PropertyError, None]
+        prop_or_error, schemas = property_from_data(
+            name=key, required=prop_required, data=value, schemas=schemas, parent_name=class_name, config=config
+        )
+        if isinstance(prop_or_error, Property):
+            prop_or_error = _add_if_no_conflict(prop_or_error)
+        if isinstance(prop_or_error, PropertyError):
+            return prop_or_error
+
+    required_properties = []
+    optional_properties = []
+    for prop in properties.values():
+        if prop.required and not prop.nullable:
+            required_properties.append(prop)
+        else:
+            optional_properties.append(prop)
+
+    return _PropertyData(
+        optional_props=optional_properties,
+        required_props=required_properties,
+        schemas=schemas,
+    )
+
+
+def _build_properties(model: ModelProperty, data: oai.Schema, schemas: Schemas, config: Config) -> Tuple[Optional[PropertyError], Schemas]:
+    property_data = _process_properties(data=data, schemas=schemas, class_name=model.class_info.name, config=config)
+    if isinstance(property_data, PropertyError):
+        return property_data
+    model.required_properties.extend(property_data.required_props)
+    model.optional_properties.extend(property_data.optional_props)
+    schemas = property_data.schemas
+    return schemas
+
+
+def _resolve_imports(component: ModelProperty):
+    for prop in chain(component.required_properties, component.optional_properties):
+        component.relative_imports.update(prop.get_imports(prefix=".."))
+        if isinstance(component.additional_properties, Property):
+            component.relative_imports.update(component.additional_properties.get_imports(prefix=".."))
 
 
 def build_schemas(
@@ -727,4 +868,36 @@ def build_schemas(
         to_process = next_round
 
     schemas.errors.extend(errors)
+    schemas.resolve_references()
+
+    still_making_progress = True
+    # Models which refer to other models in their allOf must be processed after their referenced models
+    while still_making_progress:
+        still_making_progress = False
+        # Only accumulate errors from the last round, since we might fix some along the way
+        errors = []
+        next_round = {}
+        while schemas.data_by_class_name:
+            class_name, data = schemas.data_by_class_name.popitem()
+            schemas_or_err = _build_properties(schemas.classes_by_name[class_name], data, schemas, config=config)
+            if isinstance(schemas_or_err, PropertyError):
+                if isinstance(schemas_or_err.data, oai.Reference) and schemas_or_err.data.ref.endswith(class_name):  # pragma: nocover
+                    schemas_or_err.detail += (f"\n\nRecursive allOf reference found in '{schemas_or_err.data.ref}'")
+                    del schemas.classes_by_name[class_name]
+                    schemas.errors.append(schemas_or_err)
+                    continue
+                next_round[class_name] = data
+                errors.append(schemas_or_err)
+                continue
+            schemas = schemas_or_err
+            still_making_progress = True
+        schemas.data_by_class_name.update(next_round)
+
+    schemas.errors.extend(errors)
+
+    for component in schemas.classes_by_name.values():
+        if not isinstance(component, ModelProperty):
+            continue
+        _resolve_imports(component)
+
     return schemas

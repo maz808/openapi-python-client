@@ -6,7 +6,7 @@ import attr
 
 from ... import utils
 from .property import Property
-from .schemas import Class
+from .class_ import Class
 
 ValueType = Union[str, int]
 

@@ -196,6 +196,8 @@ class Endpoint:
                 schemas,
             )
 
+        # schemas.resolve_references()
+
         if endpoint.form_body_class:
             endpoint.relative_imports.add(import_string_from_class(endpoint.form_body_class, prefix="...models"))
         if multipart_body is not None:
@@ -241,6 +243,7 @@ class Endpoint:
                     )
                 )
                 continue
+            # schemas.resolve_references()
             endpoint.relative_imports |= response.prop.get_imports(prefix="...")
             endpoint.responses.append(response)
         return endpoint, schemas

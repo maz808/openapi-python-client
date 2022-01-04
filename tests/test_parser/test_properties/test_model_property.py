@@ -119,13 +119,7 @@ class TestBuildModelProperty:
             required_properties=[string_property_factory(name="req", required=True)],
             optional_properties=[date_time_property_factory(name="opt", required=False)],
             description=data.description,
-            relative_imports={
-                "from dateutil.parser import isoparse",
-                "from typing import cast",
-                "import datetime",
-                "from ..types import UNSET, Unset",
-                "from typing import Union",
-            },
+            relative_imports=set(),
             additional_properties=True,
         )
 
@@ -147,7 +141,7 @@ class TestBuildModelProperty:
 
         data = oai.Schema(
             properties={
-                "bad": oai.Reference.construct(ref="#/components/schema/NotExist"),
+                "bad": oai.Reference.construct(ref="/invalid/reference/path"),
             },
         )
         result = build_model_property(
@@ -161,7 +155,7 @@ class TestBuildModelProperty:
         additional_properties = oai.Schema(
             type="object",
             properties={
-                "bad": oai.Reference(ref="#/components/schemas/not_exist"),
+                "bad": oai.Reference(ref="/invalid/reference/path"),
             },
         )
         data = oai.Schema(additionalProperties=additional_properties)

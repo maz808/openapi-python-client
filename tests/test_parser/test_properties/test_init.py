@@ -408,7 +408,7 @@ class TestPropertyFromData:
             name=name, required=False, data=data, schemas=schemas, parent_name="", config=Config()
         )
 
-        assert prop == enum_property_factory(
+        assert prop.ref_resolution == enum_property_factory(
             name="some_enum",
             required=False,
             values={"A": "a"},
@@ -435,7 +435,7 @@ class TestPropertyFromData:
             name=name, required=required, data=data, schemas=schemas, parent_name="", config=Config()
         )
 
-        assert prop == enum_property_factory(
+        assert prop.ref_resolution == enum_property_factory(
             name="some_enum",
             default="MyEnum.B",
             required=required,
@@ -484,26 +484,30 @@ class TestPropertyFromData:
             name=name, required=required, data=data, schemas=schemas, parent_name="", config=Config()
         )
 
-        assert prop == model_property_factory(
+        assert prop.ref_resolution == model_property_factory(
             name=name,
             required=required,
             class_info=class_info,
         )
         assert schemas == new_schemas
 
-    def test_property_from_data_ref_not_found(self, mocker):
-        from openapi_python_client.parser.properties import PropertyError, Schemas, property_from_data
+    def test_property_from_data_ref_not_found(self, reference_property_factory):
+        from openapi_python_client.parser.properties import ReferenceProperty, Schemas, property_from_data, parse_reference_path
 
-        data = oai.Reference.construct(ref="a/b/c")
-        parse_reference_path = mocker.patch(f"{MODULE_NAME}.parse_reference_path")
+        name = "a_prop"
+        required = False
+        data = oai.Reference.construct(ref="#/components/schemas/NotThereYet")
         schemas = Schemas()
 
         prop, new_schemas = property_from_data(
-            name="a_prop", required=False, data=data, schemas=schemas, parent_name="parent", config=mocker.MagicMock()
+            name=name, required=required, data=data, schemas=schemas, parent_name="", config=Config()
         )
 
-        parse_reference_path.assert_called_once_with(data.ref)
-        assert prop == PropertyError(data=data, detail="Could not find reference in parsed models or enums")
+        assert prop == reference_property_factory(
+            name=name,
+            required=required,
+            ref_path=parse_reference_path(data.ref)
+        ) 
         assert schemas == new_schemas
 
     def test_property_from_data_invalid_ref(self, mocker):
@@ -672,7 +676,7 @@ class TestPropertyFromData:
             name=name, required=required, data=data, schemas=schemas, parent_name="parent", config=Config()
         )
 
-        assert prop == attr.evolve(existing_model, name=name, required=required, nullable=nullable, python_name=name)
+        assert prop.ref_resolution == attr.evolve(existing_model, name=name, required=required, nullable=nullable, python_name=name)
         build_union_property.assert_not_called()
 
     def test_property_from_data_no_valid_props_in_data(self, any_property_factory):
@@ -804,7 +808,7 @@ class TestBuildUnionProperty:
     def test_build_union_property_invalid_property(self, mocker):
         name = "bad_union"
         required = mocker.MagicMock()
-        reference = oai.Reference.construct(ref="#/components/schema/NotExist")
+        reference = oai.Reference.construct(ref="/invalid/ref/path")
         data = oai.Schema(anyOf=[reference])
         mocker.patch("openapi_python_client.utils.remove_string_escapes", return_value=name)
 

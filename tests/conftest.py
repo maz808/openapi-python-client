@@ -15,6 +15,7 @@ from openapi_python_client.parser.properties import (
     Property,
     StringProperty,
     UnionProperty,
+    ReferenceProperty,
 )
 
 
@@ -42,6 +43,27 @@ def model_property_factory() -> Callable[..., ModelProperty]:
             **kwargs,
         }
         return ModelProperty(**kwargs)
+
+    return _factory
+
+
+@pytest.fixture
+def reference_property_factory() -> Callable[..., ReferenceProperty]:
+    """
+    This fixture surfaces in the test as a function which manufactures ReferenceProperties with defaults.
+
+    You can pass the same params into this as the ReferenceProperty constructor to override defaults.
+    """
+
+    def _factory(**kwargs):
+        kwargs = _common_kwargs(kwargs)
+        kwargs = {
+            "description": "",
+            "ref_path": "",
+            "parent": None,
+            **kwargs,
+        }
+        return ReferenceProperty(**kwargs)
 
     return _factory
 

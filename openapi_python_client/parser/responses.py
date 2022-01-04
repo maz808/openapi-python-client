@@ -8,7 +8,7 @@ from .. import Config
 from .. import schema as oai
 from ..utils import PythonIdentifier
 from .errors import ParseError, PropertyError
-from .properties import AnyProperty, Property, Schemas, property_from_data
+from .properties import AnyProperty, Property, Schemas, property_from_data, ReferenceProperty
 
 
 @attr.s(auto_attribs=True, frozen=True)
